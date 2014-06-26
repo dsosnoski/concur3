@@ -1,14 +1,15 @@
 package com.sosnoski.concur.article3;
 
 import java.text.DecimalFormat;
+import java.util.concurrent.CompletableFuture;
 
-public class ThreadSwitch implements Runnable {
+public class ThreadSwitchCompletable implements Runnable {
     
     /** Total increments spread across all threads. */
     private static final int TOTAL_INCREMENTS = 4096 * 400;
 
-    /** Lock object for increments completed. */
-    private static final Object doneLock = new Object();
+    /** Increments completed when done. */
+    private static CompletableFuture<Boolean> doneLock;
 
     /** Counter incremented by all threads. */
     private static int sharedCounter;
@@ -16,25 +17,26 @@ public class ThreadSwitch implements Runnable {
     /** Increment count for thread. */
     private final int incrementCount;
     
-    /** Ready to execute next increment flag. */
-    private volatile boolean readyToRun;
-    
     /** Data for thread. */
     private final int[] dataValues;
+    
+    /** Ready to execute next increment when complete. */
+    private volatile CompletableFuture<Boolean> readyToRun;
     
     /** Sum of data. */
     private int dataSum;
 
     /** Switcher instance to be notified after this one has incremented counter. */
-    private ThreadSwitch runNext;
+    private ThreadSwitchCompletable runNext;
     
-    public ThreadSwitch(int count, int[] data) {
+    public ThreadSwitchCompletable(int count, int[] data) {
         dataValues = data;
         incrementCount = count;
         dataSum = sumData();
+        readyToRun = new CompletableFuture<Boolean>();
     }
     
-    public void setNext(ThreadSwitch next) {
+    public void setNext(ThreadSwitchCompletable next) {
         runNext = next;
     }
     
@@ -46,9 +48,8 @@ public class ThreadSwitch implements Runnable {
         return acc;
     }
     
-    public synchronized void runNow() {
-        readyToRun = true;
-        notify();
+    public void runNow() {
+        readyToRun.complete(Boolean.TRUE);
     }
 
     public void run() {
@@ -56,15 +57,8 @@ public class ThreadSwitch implements Runnable {
         while (remain-- > 0) {
 
             // wait for signal before proceeding
-            synchronized (this) {
-                while (!readyToRun) {
-                    try {
-                        wait();
-                    } catch (InterruptedException e) { /* ignored */
-                    }
-                }
-                readyToRun = false;
-            }
+            readyToRun.join();
+            readyToRun = new CompletableFuture<Boolean>();
             
             // load data into cache
             int sum = sumData();
@@ -79,9 +73,7 @@ public class ThreadSwitch implements Runnable {
         
         // signal main thread when last thread completes
         if (sharedCounter == TOTAL_INCREMENTS) {
-            synchronized (doneLock) {
-                doneLock.notify();
-            }
+            doneLock.complete(Boolean.TRUE);
         }
     }
 
@@ -95,39 +87,31 @@ public class ThreadSwitch implements Runnable {
     private static void timeRun(int count, int size, boolean print) {
         
         // build and configure the switchers and threads
-        ThreadSwitch[] switchers = new ThreadSwitch[count];
+        ThreadSwitchCompletable[] switchers = new ThreadSwitchCompletable[count];
         for (int i = 0; i < count; i++) {
             int[] data = new int[size];
             for (int j = 0; j < size; j++) {
                 data[j] = i + j;
             }
-            switchers[i] = new ThreadSwitch(TOTAL_INCREMENTS / count, data);
+            switchers[i] = new ThreadSwitchCompletable(TOTAL_INCREMENTS / count, data);
         }
         Thread[] threads = new Thread[count];
         for (int i = 0; i < count; i++) {
-            ThreadSwitch switcher = switchers[i];
+            ThreadSwitchCompletable switcher = switchers[i];
             switcher.setNext(switchers[(i + 1) % count]);
             threads[i] = new Thread(switcher);
             threads[i].start();
         }
         
         // start executing the switchers in sequence
-        long start = System.currentTimeMillis();
+        doneLock = new CompletableFuture<Boolean>();
+        long start = System.nanoTime();
         sharedCounter = 0;
         switchers[0].runNow();
-        synchronized (doneLock) {
-            while (true) {
-                if (sharedCounter >= TOTAL_INCREMENTS) {
-                    break;
-                }
-                try {
-                    doneLock.wait();
-                } catch (InterruptedException e) { /* ignored */ }
-            }
-        }
+        doneLock.join();
         if (print) {
-            long time = System.currentTimeMillis() - start;
-            double micros = (double)time * 1000.0 / TOTAL_INCREMENTS;
+            long time = System.nanoTime() - start;
+            double micros = (double)time * 0.001 / TOTAL_INCREMENTS;
             DecimalFormat df = new DecimalFormat();
             df.setMaximumFractionDigits(3);
             df.setMinimumFractionDigits(3);
@@ -149,7 +133,7 @@ public class ThreadSwitch implements Runnable {
         // run once for each command line value
         for (int i = 0; i < args.length; i++) {
             int size = Integer.parseInt(args[i]);
-            System.out.println("Beginning run with " + size + "-byte data blocks per thread");
+            System.out.println("Beginning run with " + (size * 4) + "-byte data blocks per thread");
             int count = 1;
             for (int j = 0; j < 13; j++) {
                 timeRun(count, size, true);
